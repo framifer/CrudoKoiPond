@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>CrudoKoiPond</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  #c { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', () => { resize(); initScene(); });
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const TWO_PI = Math.PI * 2;
+
+const GREEN = '#33b06e';
+const GREEN_EDGE = '#04140d';   // dark outline for pads
+const WHITE = '#ffffff';
+
+let koi = [], pads = [], bubbles = [], food = [];
+let followX = 0, followY = 0;
+
+function initScene() {
+  pads = [];
+  const padCount = 4;
+  let guard = 0;
+  while (pads.length < padCount && guard < 400) {
+    guard++;
+    const r = W * 0.06 + Math.random() * W * 0.05;
+    const x = rnd(r, W - r), y = (rnd(r, H - r) + rnd(r, H - r)) * 0.5;
+    let overlaps = 0, wouldExceed = false;
+    for (const q of pads) {
+      const touching = Math.hypot(x - q.x, y - q.y) < (r + q.radius) * 0.92;
+      if (touching) {
+        overlaps++;
+        if (q.overlaps >= 1) { wouldExceed = true; break; }
+      }
+    }
+    if (overlaps > 1 || wouldExceed) continue;
+    const pad = {
+      x, y, radius: r,
+      notch: rnd(0, TWO_PI),
+      lobe: Math.random() < 0.55 ? 1 : 0,
+      lobeAng: rnd(0, TWO_PI),
+      overlaps
+    };
+    if (overlaps === 1) {
+      for (const q of pads) {
+        if (Math.hypot(x - q.x, y - q.y) < (r + q.radius) * 0.92) { q.overlaps = (q.overlaps || 0) + 1; break; }
+      }
+    }
+    pads.push(pad);
+  }
+  koi = [];
+  const koiCount = 5;
+  for (let i = 0; i < koiCount; i++) {
+    koi.push({
+      x: (rnd(0, W) + rnd(0, W)) * 0.5, y: (rnd(0, H) + rnd(0, H)) * 0.5, angle: rnd(0, TWO_PI),
+      speed: W * 0.065 + Math.random() * W * 0.035,
+      length: W * 0.14 + Math.random() * W * 0.04,
+      tx: (rnd(0, W) + rnd(0, W)) * 0.5, ty: (rnd(0, H) + rnd(0, H)) * 0.5,
+      boost: 0, wig: rnd(0, TWO_PI),
+      mode: 'wander', modeTimer: 0,
+      swayPhase: rnd(0, TWO_PI), swayRate: rnd(0.25, 0.5), swayAmp: rnd(0.12, 0.26),
+      spdPhase: rnd(0, TWO_PI), spdRate: rnd(0.15, 0.4),
+      spdTarget: rnd(0.6, 1.3), spdFactor: rnd(0.6, 1.3), spdTimer: rnd(1, 4)
+    });
+  }
+  bubbles = [];
+  food = [];
+  for (let i = 0; i < 8; i++) { spawnBottomBubble(); bubbles[bubbles.length-1].y = rnd(0, H); }
+}
+
+function steer(cur, tgt, max) {
+  let d = tgt - cur;
+  while (d > Math.PI) d -= TWO_PI;
+  while (d < -Math.PI) d += TWO_PI;
+  return cur + Math.max(-max, Math.min(max, d));
+}
+
+function tailBubbles(f, n) {
+  const tailX = f.x - Math.cos(f.angle) * f.length * 0.55;
+  const tailY = f.y - Math.sin(f.angle) * f.length * 0.55;
+  for (let i = 0; i < n; i++) {
+    bubbles.push({
+      x: tailX + rnd(-3, 3), y: tailY + rnd(-3, 3),
+      radius: rnd(0.7, 1.6), speed: rnd(20, 45),
+      drift: rnd(-8, 8), phase: rnd(0, TWO_PI), wobble: rnd(0.6, 1.4),
+      surface: rnd(H * 0.02, H * 0.10)
+    });
+  }
+}
+
+function update(dt) {
+  for (let i = food.length - 1; i >= 0; i--) {
+    const p = food[i]; p.y += 8 * dt; p.life -= dt;
+    if (p.life <= 0) food.splice(i, 1);
+  }
+  for (const f of koi) {
+    f.modeTimer -= dt;
+    if (f.modeTimer <= 0 && f.mode !== 'wander') f.mode = 'wander';
+    if (f.mode === 'follow') {
+      f.tx = followX; f.ty = followY;
+      f.boost = Math.max(f.boost, 1.1);
+    } else if (f.mode === 'food' && food.length) {
+      let best = null, bd = 1e9;
+      for (const p of food) { const d = Math.hypot(p.x - f.x, p.y - f.y); if (d < bd) { bd = d; best = p; } }
+      if (best) {
+        f.tx = best.x; f.ty = best.y;
+        f.boost = Math.max(f.boost, 1.8);
+        if (bd < f.length * 0.4) { best.life = Math.min(best.life, 0.15); tailBubbles(f, 1); }
+      }
+    } else if (f.mode === 'wander') {
+      const dist = Math.hypot(f.tx - f.x, f.ty - f.y);
+      if (dist < f.length * 2.5 || Math.random() < 0.0015) {
+        let nx, ny, tries = 0;
+        do {
+          nx = rnd(W * 0.08, W * 0.92); ny = rnd(H * 0.08, H * 0.92);
+          tries++;
+        } while (Math.hypot(nx - f.x, ny - f.y) < Math.min(W, H) * 0.5 && tries < 6);
+        f.tx = nx; f.ty = ny;
+      }
+    }
+
+    f.spdTimer -= dt;
+    if (f.spdTimer <= 0) { f.spdTarget = rnd(0.55, 1.35); f.spdTimer = rnd(1.5, 4.5); }
+    f.spdFactor += (f.spdTarget - f.spdFactor) * Math.min(1, dt * 0.8);
+    f.spdPhase += dt * f.spdRate;
+    const ripple = 1 + Math.sin(f.spdPhase) * 0.12;
+    const speedVar = (f.mode === 'wander') ? f.spdFactor * ripple : 1.0;
+
+    let desired = Math.atan2(f.ty - f.y, f.tx - f.x);
+    f.swayPhase += dt * f.swayRate;
+    desired += Math.sin(f.swayPhase) * f.swayAmp;
+    const turn = (0.7 + f.boost * 1.3) * dt;
+    const prevAngle = f.angle;
+    f.angle = steer(f.angle, desired, turn);
+    let turned = f.angle - prevAngle;
+    while (turned > Math.PI) turned -= TWO_PI;
+    while (turned < -Math.PI) turned += TWO_PI;
+    const turnRate = dt > 0 ? turned / dt : 0;
+    f.curve = (f.curve || 0) + ((turnRate * 0.9) - (f.curve || 0)) * Math.min(1, dt * 4);
+    const v = f.speed * speedVar * (1 + f.boost);
+    f.x += Math.cos(f.angle) * v * dt;
+    f.y += Math.sin(f.angle) * v * dt;
+    f.boost *= Math.max(0, 1 - 1.6 * dt);
+    f.wig += dt * (1.4 + speedVar * 1.0 + f.boost * 3.5);
+    const m = f.length;
+    if (f.x < -m) f.x = W + m; if (f.x > W + m) f.x = -m;
+    if (f.y < -m) f.y = H + m; if (f.y > H + m) f.y = -m;
+    if (Math.random() < 0.008) tailBubbles(f, 1);
+  }
+
+  for (const f of koi) {
+    let ax = 0, ay = 0, count = 0;
+    for (const o of koi) {
+      if (o === f) continue;
+      const dx = f.x - o.x, dy = f.y - o.y;
+      const d = Math.hypot(dx, dy);
+      const sense = (f.length + o.length) * 0.7;
+      if (d > 0.0001 && d < sense) {
+        const wgt = (sense - d) / sense;
+        ax += (dx / d) * wgt; ay += (dy / d) * wgt; count++;
+      }
+    }
+    if (count > 0) {
+      const away = Math.atan2(ay, ax);
+      f.angle = steer(f.angle, away, 1.0 * dt);
+    }
+  }
+
+  const bodyCircles = (fish) => {
+    const r = fish.length * 0.14;
+    const cosA = Math.cos(fish.angle), sinA = Math.sin(fish.angle);
+    const offs = [fish.length * 0.32, 0, -fish.length * 0.34];
+    return offs.map(o => ({ x: fish.x + cosA * o, y: fish.y + sinA * o, r, off: o }));
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    let moved = false;
+    for (let a = 0; a < koi.length; a++) {
+      for (let b = a + 1; b < koi.length; b++) {
+        const f1 = koi[a], f2 = koi[b];
+        if (Math.hypot(f2.x - f1.x, f2.y - f1.y) > (f1.length + f2.length) * 0.7) continue;
+        const c1 = bodyCircles(f1), c2 = bodyCircles(f2);
+        for (const p of c1) {
+          for (const q of c2) {
+            const dx = q.x - p.x, dy = q.y - p.y;
+            let dist = Math.hypot(dx, dy);
+            const minD = p.r + q.r;
+            if (dist < 0.001) dist = 0.001;
+            if (dist < minD) {
+              const overlap = minD - dist;
+              const nx = dx / dist, ny = dy / dist;
+              const k = overlap * 0.22;
+              f1.x -= nx * k; f1.y -= ny * k;
+              f2.x += nx * k; f2.y += ny * k;
+              moved = true;
+            }
+          }
+        }
+      }
+    }
+    if (!moved) break;
+  }
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    b.y -= b.speed * dt;
+    b.phase += dt * 2.5 * b.wobble;
+    b.x += Math.sin(b.phase) * b.drift * dt;
+    b.radius += dt * 0.15;
+    if (b.y <= b.surface) bubbles.splice(i, 1);
+  }
+  if (Math.random() < 0.05) spawnBottomBubble();
+}
+
+function spawnBottomBubble() {
+  bubbles.push({
+    x: rnd(0, W), y: H + 6, radius: rnd(0.8, 1.8),
+    speed: H * 0.05 + Math.random() * H * 0.05,
+    drift: rnd(-12, 12), phase: rnd(0, TWO_PI), wobble: rnd(0.6, 1.4),
+    surface: rnd(H * 0.02, H * 0.12)
+  });
+}
+
+function drawLilyPad(p) {
+  const wedge = (cx, cy, r) => {
+    ctx.beginPath();
+    const a0 = p.notch + 0.42, a1 = p.notch - 0.42 + TWO_PI;
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, a0, a1, false);
+    ctx.closePath();
+  };
+  ctx.fillStyle = GREEN_EDGE;
+  wedge(p.x, p.y, p.radius); ctx.fill();
+  if (p.lobe) {
+    const ox = p.x + Math.cos(p.lobeAng) * p.radius * 0.7;
+    const oy = p.y + Math.sin(p.lobeAng) * p.radius * 0.7;
+    wedge(ox, oy, p.radius * 0.8); ctx.fill();
+  }
+  const inset = Math.max(1, p.radius * 0.03);
+  ctx.fillStyle = GREEN;
+  wedge(p.x, p.y, p.radius - inset); ctx.fill();
+  if (p.lobe) {
+    const ox = p.x + Math.cos(p.lobeAng) * p.radius * 0.7;
+    const oy = p.y + Math.sin(p.lobeAng) * p.radius * 0.7;
+    wedge(ox, oy, p.radius * 0.8 - inset); ctx.fill();
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  const clipWedge = (cx, cy, r) => {
+    const a0 = p.notch + 0.42, a1 = p.notch - 0.42 + TWO_PI;
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, a0, a1, false);
+    ctx.closePath();
+  };
+  clipWedge(p.x, p.y, p.radius - inset);
+  if (p.lobe) {
+    const ox = p.x + Math.cos(p.lobeAng) * p.radius * 0.7;
+    const oy = p.y + Math.sin(p.lobeAng) * p.radius * 0.7;
+    clipWedge(ox, oy, p.radius * 0.8 - inset);
+  }
+  ctx.clip();
+
+  const rg = ctx.createRadialGradient(p.x, p.y, p.radius * 0.2, p.x, p.y, p.radius);
+  rg.addColorStop(0, 'rgba(90,200,130,0.0)');
+  rg.addColorStop(1, 'rgba(3,50,28,0.45)');
+  ctx.fillStyle = rg;
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, TWO_PI); ctx.fill();
+
+  ctx.strokeStyle = 'rgba(3, 55, 30, 0.5)';
+  ctx.lineWidth = 1;
+  const veinCount = 11;
+  const spread = TWO_PI - 0.9;
+  for (let i = 0; i < veinCount; i++) {
+    const a = p.notch + 0.55 + (i / (veinCount - 1)) * spread;
+    const curve = (i % 2 === 0 ? 1 : -1) * 0.12;
+    const ex = p.x + Math.cos(a) * p.radius;
+    const ey = p.y + Math.sin(a) * p.radius;
+    const mx = p.x + Math.cos(a + curve) * p.radius * 0.55;
+    const my = p.y + Math.sin(a + curve) * p.radius * 0.55;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.quadraticCurveTo(mx, my, ex, ey);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(3, 55, 30, 0.28)';
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.radius * 0.7, 0, TWO_PI); ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(150, 225, 175, 0.22)';
+  for (let i = 0; i < veinCount; i += 3) {
+    const a = p.notch + 0.55 + (i / (veinCount - 1)) * spread;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + Math.cos(a) * p.radius * 0.9, p.y + Math.sin(a) * p.radius * 0.9);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+const POND = '#000000';
+
+function koiGeometry(f) {
+  const len = f.length;
+  const bodyW = len * 0.20;
+  const seg = 16;
+  const sx = [], sy = [];
+  const bend = Math.max(-1.2, Math.min(1.2, (f.curve || 0)));
+  for (let i = 0; i <= seg; i++) {
+    const s = i / seg;
+    sx.push(len * (0.52 - s * 1.02));
+    const swim = Math.sin(f.wig - s * 3.6) * bodyW * 0.9 * s;
+    const flex = bend * len * 0.62 * (s * s);
+    sy.push(swim + flex);
+  }
+  const widthAt = (s) => {
+    const head = Math.pow(Math.min(1, (s + 0.12) * 2.4), 0.6);
+    const taper = Math.pow(1 - s, 1.25);
+    return bodyW * Math.min(1, head) * taper + 0.6;
+  };
+  return { len, bodyW, seg, sx, sy, widthAt };
+}
+
+function drawKoiPectorals(f) {
+  const g = koiGeometry(f);
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  ctx.rotate(f.angle);
+  ctx.strokeStyle = WHITE;
+  ctx.lineWidth = 1.3;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  const pI = Math.round(g.seg * 0.18);
+  const wave = Math.sin(f.wig * 1.1);
+  for (const side of [-1, 1]) {
+    const baseX = g.sx[pI], baseY = g.sy[pI] + side * g.widthAt(pI / g.seg) * 0.7;
+    const flap = wave * 0.35 * side;
+    ctx.beginPath();
+    ctx.moveTo(baseX, baseY);
+    ctx.bezierCurveTo(
+      baseX - g.len * 0.03, baseY + side * g.bodyW * (0.55 + flap),
+      baseX - g.len * 0.08, baseY + side * g.bodyW * (0.8 + flap),
+      baseX - g.len * 0.09, baseY + side * g.bodyW * (0.4 + flap * 0.5)
+    );
+    ctx.bezierCurveTo(
+      baseX - g.len * 0.06, baseY + side * g.bodyW * 0.35,
+      baseX - g.len * 0.02, baseY + side * g.bodyW * 0.25,
+      baseX, baseY
+    );
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawKoiBody(f) {
+  const g = koiGeometry(f);
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  ctx.rotate(f.angle);
+
+  const path = new Path2D();
+  const noseY = g.widthAt(0);
+  const noseX = g.sx[0];
+  path.moveTo(noseX, g.sy[0] - noseY);
+  for (let i = 1; i <= g.seg; i++) path.lineTo(g.sx[i], g.sy[i] - g.widthAt(i / g.seg));
+
+  const tx = g.sx[g.seg], ty = g.sy[g.seg];
+  const wag = Math.sin(f.wig * 1.0) * g.bodyW * 0.35;
+  const fanLen = g.len * 0.07;
+  const fanW = g.bodyW * 0.6;
+  path.bezierCurveTo(
+    tx - fanLen * 0.4, ty - fanW * 0.7 + wag,
+    tx - fanLen * 1.0, ty - fanW + wag,
+    tx - fanLen * 1.15, ty - fanW * 0.4 + wag
+  );
+  path.quadraticCurveTo(tx - fanLen * 1.35, ty + wag, tx - fanLen * 1.15, ty + fanW * 0.4 + wag);
+  path.bezierCurveTo(
+    tx - fanLen * 1.0, ty + fanW + wag,
+    tx - fanLen * 0.4, ty + fanW * 0.7 + wag,
+    tx, ty
+  );
+
+  for (let i = g.seg; i >= 0; i--) path.lineTo(g.sx[i], g.sy[i] + g.widthAt(i / g.seg));
+  path.bezierCurveTo(
+    noseX + g.len * 0.12, g.sy[0] + noseY * 0.5,
+    noseX + g.len * 0.12, g.sy[0] - noseY * 0.5,
+    noseX, g.sy[0] - noseY
+  );
+  path.closePath();
+
+  ctx.fillStyle = POND;
+  ctx.fill(path);
+  ctx.strokeStyle = WHITE;
+  ctx.lineWidth = 1.4;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.stroke(path);
+
+  ctx.fillStyle = WHITE;
+  const eI = 1;
+  const eEdge = g.widthAt(eI / g.seg);
+  const eRx = g.bodyW * 0.26;
+  const eRy = g.bodyW * 0.10;
+  for (const side of [-1, 1]) {
+    const ex = g.sx[eI];
+    const ey = g.sy[eI] + side * (eEdge - eRy * 1.1);
+    ctx.save();
+    ctx.translate(ex, ey);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, eRx, eRy, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawKoiDorsal(f) {
+  const g = koiGeometry(f);
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  ctx.rotate(f.angle);
+  ctx.strokeStyle = WHITE;
+  ctx.lineWidth = 1.2;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  const dStart = Math.round(g.seg * 0.34), dEnd = Math.round(g.seg * 0.52);
+  ctx.beginPath();
+  ctx.moveTo(g.sx[dStart], g.sy[dStart]);
+  for (let i = dStart + 1; i <= dEnd; i++) {
+    const s = (i - dStart) / (dEnd - dStart);
+    const bulge = Math.sin(s * Math.PI) * g.bodyW * 0.18;
+    ctx.lineTo(g.sx[i], g.sy[i] - bulge);
+  }
+  for (let i = dEnd; i >= dStart; i--) {
+    ctx.lineTo(g.sx[i], g.sy[i]);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBubble(b) {
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.radius, 0, TWO_PI); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, b.radius * 0.6, Math.PI * 1.05, Math.PI * 1.6);
+  ctx.stroke();
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  for (const b of bubbles) drawBubble(b);
+
+  for (const f of koi) {
+    drawKoiPectorals(f);
+    drawKoiBody(f);
+    drawKoiDorsal(f);
+  }
+
+  for (const p of food) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life / 3));
+    ctx.fillStyle = '#dfe6c0';
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TWO_PI); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of pads) drawLilyPad(p);
+}
+
+let pendingTap = null, lastTapTime = 0, lastTapPos = null;
+const DOUBLE_MS = 320;
+const HOLD_MS = 250;
+function dropFood(px, py, n) {
+  for (let i = 0; i < (n || 5); i++) food.push({ x: px + rnd(-12, 12), y: py + rnd(-12, 12), r: rnd(1, 2), life: rnd(6, 9) });
+  for (const f of koi) { f.mode = 'food'; f.modeTimer = 9; f.boost = Math.max(f.boost, 1.6); }
+}
+function scare(px, py) {
+  for (const f of koi) {
+    const dx = f.x - px, dy = f.y - py, dist = Math.hypot(dx, dy) || 1;
+    f.angle = Math.atan2(dy, dx);
+    f.tx = f.x + (dx / dist) * W * 1.5; f.ty = f.y + (dy / dist) * H * 1.5;
+    const near = Math.max(0, 1 - dist / (Math.min(W, H) * 0.7));
+    f.boost = 4.0 + near * 2.5;
+    f.mode = 'flee'; f.modeTimer = 1.8 + near * 0.8;
+    tailBubbles(f, 4);
+  }
+}
+function pointerPos(e) { const r = canvas.getBoundingClientRect(); const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e; return { x: t.clientX - r.left, y: t.clientY - r.top }; }
+
+let holdTimer = null;
+let feeding = false;
+let feedInterval = null;
+let curPos = null;
+let downTime = 0, downPos = null, moved = false;
+
+function startFeeding() {
+  feeding = true;
+  dropFood(curPos.x, curPos.y, 4);
+  feedInterval = setInterval(() => { if (curPos) dropFood(curPos.x, curPos.y, 2); }, 350);
+}
+function stopFeeding() {
+  feeding = false;
+  if (feedInterval) { clearInterval(feedInterval); feedInterval = null; }
+}
+
+function onDown(e) {
+  const p = pointerPos(e); curPos = p; downPos = p; moved = false;
+  const now = performance.now();
+  if (lastTapPos && (now - lastTapTime) < DOUBLE_MS && Math.hypot(p.x - lastTapPos.x, p.y - lastTapPos.y) < 60) {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    scare(p.x, p.y); lastTapTime = 0; lastTapPos = null; return;
+  }
+  downTime = now;
+  holdTimer = setTimeout(startFeeding, HOLD_MS);
+}
+function onMove(e) {
+  if (!downPos && !feeding) return;
+  const p = pointerPos(e); curPos = p;
+  if (downPos && Math.hypot(p.x - downPos.x, p.y - downPos.y) > 10) moved = true;
+  if (feeding) {
+    followX = p.x; followY = p.y;
+    for (const f of koi) { f.mode = 'follow'; f.modeTimer = 0.8; f.boost = Math.max(f.boost, 1.3); }
+  }
+}
+function onUp(e) {
+  if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+  const now = performance.now();
+  if (feeding) { stopFeeding(); }
+  else {
+    const dur = now - downTime;
+    if (dur < HOLD_MS && !moved && curPos) {
+      scare(curPos.x, curPos.y);
+      lastTapTime = now; lastTapPos = curPos;
+    }
+  }
+  downPos = null;
+}
+
+canvas.addEventListener('mousedown', onDown);
+window.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); onDown(e); }, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); onMove(e); }, { passive: false });
+canvas.addEventListener('touchend', e => { e.preventDefault(); onUp(e); }, { passive: false });
+
+let last = 0;
+function loop(now) {
+  const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016;
+  last = now; update(dt); draw(); requestAnimationFrame(loop);
+}
+resize(); initScene(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
